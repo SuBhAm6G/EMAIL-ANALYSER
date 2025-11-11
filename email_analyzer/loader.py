@@ -8,7 +8,7 @@ def load_csv(filepath: str) -> pd.DataFrame:
     df = pd.read_csv(filepath, dtype=str)  # read everything as string to avoid surprises
     # attempt to parse Date if present
     if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=True, dayfirst=True)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=True, dayfirst=False)
     return df
 
 def basic_clean(df: pd.DataFrame, text_columns: Optional[list] = None) -> pd.DataFrame:
