@@ -1,18 +1,24 @@
 """
-Light wrapper to run the Streamlit app reliably from the project root.
+app.py
+Runs the top-level dashboard.py as the Streamlit entry point.
 
 Usage:
-  pip install -r requirements.txt
-  streamlit run app.py
-
-This simply imports the package dashboard so Streamlit executes the app
-in a predictable import context (avoids issues with duplicated filenames).
+    streamlit run app.py
 """
 from pathlib import Path
+import runpy
 import sys
 
-# Ensure project root is on sys.path (helps when running from other CWDs)
-sys.path.insert(0, str(Path(__file__).parent))
+# Path to project root (folder containing app.py & dashboard.py)
+PROJECT_ROOT = Path(__file__).resolve().parent
+DASHBOARD_PATH = PROJECT_ROOT / "dashboard.py"
 
-# Import the package dashboard module which contains the Streamlit app code.
-import email_analyzer.dashboard  # noqa: F401
+# Ensure project root is importable
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Sanity check
+if not DASHBOARD_PATH.exists():
+    raise FileNotFoundError(f"dashboard.py not found at: {DASHBOARD_PATH}")
+
+# Execute dashboard.py as if it were the main Streamlit script
+runpy.run_path(str(DASHBOARD_PATH), run_name="__main__")

@@ -26,7 +26,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Light-mode, modern styling for Streamlit (keeps layout compatible with Streamlit classnames)
+# ------------------------ GLOBAL THEME CSS ------------------------
 st.markdown(
     """
     <style>
@@ -43,6 +43,26 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# ------------------------ METRIC TEXT COLOR FIX ------------------------
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetricValue"] {
+        color: #0f172a !important;
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #1e293b !important;
+    }
+    div[data-testid="stMetricDelta"] {
+        color: #2563eb !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ------------------------ APP BODY ------------------------
 
 st.title("📧 Email Analyzer Dashboard")
 st.write("Upload your email CSV and explore insights interactively!")
