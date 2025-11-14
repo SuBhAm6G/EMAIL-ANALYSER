@@ -72,7 +72,7 @@ def auto_correct_csv(input_path: str, output_path: str = None, parse_date: bool 
 
     # write corrected CSV (index=False to avoid adding an extra column)
     df.to_csv(output_path, index=False)
-    print(f"Corrected csv generated at {output_path}")
+    # print(f"Corrected csv generated at {output_path}")
     return output_path
 
 
