@@ -1,4 +1,4 @@
-# 📧 Email Analyzer — Interactive Dashboard (Plotly + Streamlit)
+# 📧 Email Analyzer — Interactive Dashboard (Pandas + Plotly + Streamlit)
 
 A modern, fully-interactive email intelligence dashboard built using **Streamlit**, **Plotly**, **Pandas**, and a custom **Email Analyzer Engine**. Upload any email CSV dataset—Gmail Takeout, Outlook export, or custom logs—or use built-in, realistic sample data to explore trends instantly.
 
