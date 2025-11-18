@@ -1,4 +1,9 @@
-# email_analyzer/dashboard.py
+"""
+Streamlit Email Analyzer — Updated to use Plotly for interactive charts.
+Drop this file into your project root. It keeps your original app structure
+but replaces matplotlib-based plotting with Plotly implementations so you
+get zoom/pan/save interactivity inside Streamlit.
+"""
 import streamlit as st
 import pandas as pd
 from email_analyzer.preprocess import auto_correct_csv
@@ -11,19 +16,321 @@ from email_analyzer.analysis import (
     most_frequent_word,
     most_repetitive_label,
 )
-from email_analyzer.plots import (
-    plot_emails_per_day,
-    plot_top_senders,
-    plot_top_labels,
-)
 import tempfile
 import os
+from datetime import datetime, timedelta
+import io
+
+# Plotly & matplotlib (for cmap conversion)
+import plotly.graph_objects as go
+import matplotlib as mpl
 
 st.set_page_config(
     page_title="📧 Email Analyzer",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ======================== ENHANCED SAMPLE DATA GENERATOR ========================
+def generate_sample_data(sample_type="medium"):
+    """Generate realistic sample email data for demo purposes.
+
+    Improvements over the previous generator:
+    - Adds realistic label assignment logic (Inbox, Work, Urgent, Spam, Promotions, Social, Follow-up, Archive)
+    - Produces plausible subjects and shorter bodies so UI tables look nicer
+    - Adds a "To" column and small variation in domains
+    - Tries to balance label distribution while still being content-aware
+    """
+    if sample_type == "small":
+        num_emails = 500
+        date_range = 30
+    elif sample_type == "medium":
+        num_emails = 2500
+        date_range = 90
+    else:  # large
+        num_emails = 5000
+        date_range = 180
+
+    import random
+
+    senders = [
+        "john.smith@company.com",
+        "sarah.jones@company.com",
+        "michael.brown@company.com",
+        "emma.wilson@company.com",
+        "david.miller@client.com",
+        "alice.johnson@vendor.com",
+        "bob.davis@partner.org",
+        "carol.martin@company.com",
+        "noreply@newsletters.com",
+        "social@platform.com",
+    ]
+
+    # Expanded label set for a realistic inbox
+    labels = ["Inbox", "Work", "Urgent", "Follow-up", "Archive", "Spam", "Promotions", "Social"]
+
+    words_pool = [
+        "meeting",
+        "project",
+        "deadline",
+        "review",
+        "update",
+        "discussion",
+        "feedback",
+        "proposal",
+        "strategy",
+        "analysis",
+        "report",
+        "schedule",
+        "confirmation",
+        "approved",
+        "pending",
+        "urgent",
+        "important",
+        "invoice",
+        "discount",
+        "offer",
+        "subscribe",
+        "invite",
+        "social",
+        "password",
+        "secure",
+    ]
+
+    data = []
+    base_date = datetime.now() - timedelta(days=date_range)
+
+    # helper to pick label from content & sender heuristics
+    def assign_label(sender, subject, body_words):
+        lower_subject = subject.lower()
+        body_str = " ".join(body_words).lower()
+
+        # spam heuristics
+        if sender.startswith("noreply") or any(word in body_str for word in ["discount", "offer", "subscribe"]) and random.random() < 0.6:
+            return "Promotions"
+        if any(word in body_str for word in ["password", "secure"]) and random.random() < 0.8:
+            return "Inbox"
+        if random.random() < 0.03:
+            return "Spam"
+
+        # urgent / deadline
+        if "urgent" in body_str or "deadline" in body_str or "important" in body_str:
+            return "Urgent"
+
+        # social / platform
+        if sender.endswith("@platform.com") or "social" in body_str or "invite" in body_str:
+            return "Social"
+
+        # vendor / newsletters
+        if sender.endswith("@vendor.com") or sender.endswith("@newsletters.com"):
+            return "Promotions" if random.random() < 0.8 else "Work"
+
+        # client/company emails -> work
+        if sender.endswith("@client.com") or sender.endswith("@company.com") or sender.endswith("@partner.org"):
+            # follow-ups and archive sometimes
+            if "follow-up" in lower_subject or "follow up" in lower_subject or random.random() < 0.08:
+                return "Follow-up"
+            if random.random() < 0.06:
+                return "Archive"
+            return "Work"
+
+        # default inbox
+        return random.choices(["Inbox", "Work", "Follow-up"], weights=[0.6, 0.3, 0.1])[0]
+
+    for _ in range(num_emails):
+        date = base_date + timedelta(days=random.randint(0, date_range), seconds=random.randint(0, 86399))
+        sender = random.choice(senders)
+
+        # make subjects slightly more realistic
+        subj_word = random.choice(words_pool)
+        subject_templates = [
+            f"{subj_word.title()} update",
+            f"{subj_word.title()} - action required",
+            f"Request: {subj_word.title()}",
+            f"Invitation: {subj_word.title()}",
+            f"Re: {subj_word.title()}",
+            f"{subj_word.title()} details",
+        ]
+        subject = random.choice(subject_templates)
+
+        # body length scaled down for table display
+        word_count = random.randint(20, 120)
+        body_words = random.choices(words_pool, k=word_count)
+        body = " ".join(body_words)
+
+        label = assign_label(sender, subject, body_words)
+
+        # add small variety to To/Cc
+        to_address = "you@company.com"
+
+        data.append(
+            {
+                "From": sender,
+                "To": to_address,
+                "Subject": subject,
+                "Body": body,
+                "Date": date,
+                "Labels": label,
+            }
+        )
+
+    df = pd.DataFrame(data)
+
+    # ensure consistent dtypes & sample of label distribution
+    df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
+    df["Labels"] = df["Labels"].astype(str)
+
+    return df
+
+
+# ======================== PLOTTING (PLOTLY) HELPERS ========================
+def _matplotlib_cmap_to_list(cmap_name="tab20", n_colors=10):
+    """
+    Convert a matplotlib colormap name to a list of hex colors for Plotly.
+    If cmap_name is invalid, falls back to 'tab20'.
+    """
+    try:
+        cmap = mpl.cm.get_cmap(cmap_name)
+    except Exception:
+        cmap = mpl.cm.get_cmap("tab20")
+    colors = []
+    # if n_colors == 1, sample middle color
+    if n_colors == 1:
+        rgba = cmap(0.5)
+        colors.append(mpl.colors.to_hex(rgba))
+        return colors
+
+    for i in range(n_colors):
+        rgba = cmap(i / max(1, n_colors - 1))
+        hexc = mpl.colors.to_hex(rgba)
+        colors.append(hexc)
+    return colors
+
+
+def plot_top_senders(df, n=10, cmap="tab20"):
+    """
+    Return a Plotly horizontal bar chart of top n senders.
+    Accepts either raw dataframe (expects 'From') or aggregated list/df.
+    """
+    if df is None:
+        return None
+
+    # handle list/tuple of tuples or pre-aggregated DataFrame
+    if isinstance(df, (list, tuple)):
+        agg = pd.DataFrame(df, columns=["Sender", "Count"]).sort_values("Count", ascending=True).tail(n)
+    else:
+        if "From" not in df.columns:
+            return None
+        agg = df["From"].value_counts().rename_axis("Sender").reset_index(name="Count").nlargest(n, "Count").sort_values("Count", ascending=True)
+
+    if agg.empty:
+        return None
+
+    colors = _matplotlib_cmap_to_list(cmap, n_colors=len(agg))
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=agg["Count"],
+            y=agg["Sender"],
+            orientation="h",
+            marker=dict(color=colors),
+            hovertemplate="%{y}: %{x}<extra></extra>",
+            showlegend=False,
+        )
+    )
+    fig.update_layout(
+        margin=dict(l=180, r=20, t=30, b=40),
+        xaxis_title="Count",
+        yaxis_title="Sender",
+        template="plotly_dark",
+        height=400 + max(0, (len(agg) - 6) * 22),
+    )
+    return fig
+
+
+def plot_emails_per_day(df, cmap="tab20"):
+    """
+    Plot a time-series of emails per day as a Plotly line + area chart.
+    Expects df to have a 'Date' column (datetime-like).
+    """
+    if df is None or "Date" not in df.columns:
+        return None
+
+    tmp = df.copy()
+    tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
+    tmp = tmp.dropna(subset=["Date"])
+    if tmp.empty:
+        return None
+
+    daily = tmp.set_index("Date").resample("D").size().rename("Count").reset_index()
+    if daily.empty:
+        return None
+
+    colors = _matplotlib_cmap_to_list(cmap, n_colors=1)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=daily["Date"],
+            y=daily["Count"],
+            mode="lines+markers",
+            line=dict(width=2),
+            fill="tozeroy",
+            hovertemplate="%{x|%Y-%m-%d}: %{y}<extra></extra>",
+            name="Emails",
+        )
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        margin=dict(l=40, r=20, t=30, b=40),
+        xaxis_title="Date",
+        yaxis_title="Emails per day",
+        height=420,
+    )
+    fig.update_traces(line_color=colors[0])
+    fig.update_xaxes(
+        rangeslider_visible=True,
+        rangeselector=dict(
+            buttons=list(
+                [
+                    dict(count=7, label="7d", step="day", stepmode="backward"),
+                    dict(count=30, label="1m", step="day", stepmode="backward"),
+                    dict(count=90, label="3m", step="day", stepmode="backward"),
+                    dict(step="all"),
+                ]
+            )
+        ),
+    )
+    return fig
+
+
+def plot_top_labels(df, n=10, cmap="tab20"):
+    """
+    Plot top labels as a Plotly donut chart.
+    Expects df to have a 'Labels' column.
+    """
+    if df is None or "Labels" not in df.columns:
+        return None
+
+    agg = df["Labels"].value_counts().rename_axis("Labels").reset_index(name="Count").nlargest(n, "Count")
+    if agg.empty:
+        return None
+
+    colors = _matplotlib_cmap_to_list(cmap, n_colors=len(agg))
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=agg["Labels"],
+                values=agg["Count"],
+                hole=0.36,
+                marker=dict(colors=colors),
+                sort=False,
+                textinfo="percent+label",
+            )
+        ]
+    )
+    fig.update_layout(template="plotly_dark", margin=dict(t=20, b=20, l=20, r=20), height=420)
+    return fig
+
 
 # ======================== MODERN DESIGN SYSTEM ========================
 st.markdown(
@@ -332,18 +639,175 @@ st.markdown(
         background: rgba(59, 130, 246, 0.6);
     }
     
+    /* ===== EXAMPLE BUTTONS ===== */
+    .example-btn {
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(6, 182, 212, 0.1) 100%);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        border-radius: 10px;
+        padding: 0.75rem 1.5rem;
+        color: var(--text-primary);
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        width: 100%;
+        margin-bottom: 0.75rem;
+    }
+    
+    .example-btn:hover {
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.3) 0%, rgba(6, 182, 212, 0.2) 100%);
+        border-color: var(--success);
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-md);
+    }
+    
+    /* ===== CENTERED CHART WRAPPER ===== */
+    .centered-chart {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
+    }
+    
     /* ===== RESPONSIVE ===== */
+    @media (max-width: 1024px) {
+        .stSidebar {
+            width: 250px;
+        }
+    }
+    
     @media (max-width: 768px) {
+        * {
+            font-size: 14px;
+        }
+        
         .header-container {
-            padding: 1.5rem;
+            padding: 1.25rem;
+            margin-bottom: 1.5rem;
+            border-radius: 12px;
         }
         
         .header-container h1 {
-            font-size: 2rem;
+            font-size: 1.75rem;
+            letter-spacing: 0;
+        }
+        
+        .header-container p {
+            font-size: 0.95rem;
         }
         
         .metric-card {
-            padding: 1.25rem;
+            padding: 1rem;
+            border-radius: 12px;
+        }
+        
+        .metric-value {
+            font-size: 1.5rem;
+        }
+        
+        .metric-label {
+            font-size: 0.8rem;
+        }
+        
+        .section-title {
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+        }
+        
+        [data-testid="stDataFrame"] {
+            font-size: 12px !important;
+        }
+        
+        .stButton > button {
+            padding: 0.6rem 1.2rem;
+            font-size: 0.9rem;
+        }
+        
+        .stSlider {
+            padding: 1rem 0;
+        }
+        
+        /* Stack columns on tablet */
+        [data-testid="stHorizontalBlock"] {
+            display: flex;
+            flex-direction: column !important;
+        }
+        
+        [data-testid="stColumn"] {
+            width: 100% !important;
+            margin-bottom: 1rem;
+        }
+    }
+    
+    @media (max-width: 480px) {
+        .header-container {
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        .header-container h1 {
+            font-size: 1.4rem;
+            margin-bottom: 0.25rem;
+        }
+        
+        .header-container p {
+            font-size: 0.9rem;
+        }
+        
+        .metric-card {
+            padding: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+        
+        .metric-value {
+            font-size: 1.25rem;
+        }
+        
+        .metric-label {
+            font-size: 0.7rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .section-title {
+            font-size: 1.1rem;
+            margin-bottom: 0.75rem;
+        }
+        
+        .section-title::after {
+            width: 25px;
+        }
+        
+        [data-testid="stDataFrame"] {
+            font-size: 11px !important;
+        }
+        
+        .stButton > button {
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+        }
+        
+        hr {
+            margin: 1rem 0;
+        }
+        
+        /* Full width stacking on mobile */
+        [data-testid="stHorizontalBlock"] {
+            display: flex;
+            flex-direction: column !important;
+        }
+        
+        [data-testid="stColumn"] {
+            width: 100% !important;
+        }
+        
+        /* Make charts responsive */
+        [data-testid="stPlotlyChart"] {
+            width: 100% !important;
+        }
+        
+        /* Adjust file uploader */
+        [data-testid="stFileUploadDropzone"] {
+            border-radius: 8px !important;
+            padding: 1rem !important;
         }
     }
     </style>
@@ -369,8 +833,8 @@ st.markdown(
 st.markdown(
     """
     <div class="header-container">
-        <h1>📧 Email Intelligence Dashboard</h1>
-        <p>Deep dive into your email patterns with AI-powered analytics</p>
+        <h1>Email Intelligence Dashboard</h1>
+        <p>Deep dive into your email patterns with analytics</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -379,22 +843,61 @@ st.markdown(
 # Sidebar
 with st.sidebar:
     st.markdown("<h3 style='color: var(--primary); margin-bottom: 1.5rem;'>⚙️ Configuration</h3>", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("📂 Upload your email CSV", type=["csv"], label_visibility="collapsed")
-    
-    st.markdown("<hr style='margin: 1.5rem 0;'>", unsafe_allow_html=True)
-    
-    st.markdown("<p style='color: var(--text-secondary); font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem;'>Display Settings</p>", unsafe_allow_html=True)
-    
-    top_n = st.slider("📊 Top N items", min_value=5, max_value=30, value=10, label_visibility="collapsed")
-    color_map = st.selectbox(
-        "🎨 Color palette",
-        ["tab10", "tab20", "Set2", "Set3", "viridis", "plasma", "cividis"],
-        index=1,
-        label_visibility="collapsed"
+
+    upload_option = st.radio(
+        "📂 Choose data source",
+        ["Upload CSV", "Use Sample Data"],
+        label_visibility="collapsed",
     )
 
+    uploaded_file = None
+    df = None
+
+    # Show sample data buttons only when "Use Sample Data" is selected
+    if upload_option == "Use Sample Data":
+        st.markdown(
+            "<p style='color: var(--text-secondary); font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem;'>Sample Data</p>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("📁 Small (500 emails)", use_container_width=True, key="small"):
+            st.session_state.sample_data = generate_sample_data("small")
+            st.session_state.sample_loaded = True
+
+        if st.button("📂 Medium (2.5k emails)", use_container_width=True, key="medium"):
+            st.session_state.sample_data = generate_sample_data("medium")
+            st.session_state.sample_loaded = True
+
+        if st.button("📊 Large (5k emails)", use_container_width=True, key="large"):
+            st.session_state.sample_data = generate_sample_data("large")
+            st.session_state.sample_loaded = True
+
+        st.markdown("<hr style='margin: 1.5rem 0;'>", unsafe_allow_html=True)
+    else:
+        # Show file uploader when "Upload CSV" is selected
+        st.markdown(
+            "<p style='color: var(--text-secondary); font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem;'>Upload CSV</p>",
+            unsafe_allow_html=True,
+        )
+
+        uploaded_file = st.file_uploader("📂 Upload your email CSV", type=["csv"], label_visibility="collapsed")
+
+        st.markdown("<hr style='margin: 1.5rem 0;'>", unsafe_allow_html=True)
+
+    st.markdown("<hr style='margin: 1.5rem 0;'>", unsafe_allow_html=True)
+
+    st.markdown(
+        "<p style='color: var(--text-secondary); font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem;'>Display Settings</p>",
+        unsafe_allow_html=True,
+    )
+
+    top_n = st.slider("📊 Top N items", min_value=5, max_value=30, value=10, label_visibility="collapsed")
+
+    # Default color map (not shown to user, always tab20)
+    color_map = "tab20"
+
+# Handle data loading
 if uploaded_file is not None:
-    # Save and process file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
         tmp.write(uploaded_file.read())
         temp_path = tmp.name
@@ -405,13 +908,39 @@ if uploaded_file is not None:
     df = load_csv(corrected_path)
     df = basic_clean(df)
 
+    try:
+        os.remove(temp_path)
+    except Exception:
+        pass
+
+elif "sample_loaded" in st.session_state:
+    df = st.session_state.sample_data
+    st.sidebar.success("✅ Sample data loaded successfully!")
+
+# Render dashboard if data is available
+if df is not None:
     # Key Statistics
     total = total_emails(df)
     avg_day = avg_emails_per_day(df)
     date_most, count_most = date_with_most_emails(df)
 
-    col1, col2, col3 = st.columns(3, gap="medium")
-    
+    # Responsive columns based on screen size
+    # Using CSS to detect screen size and adjust layout
+    st.markdown(
+        """
+        <style>
+        @media (max-width: 768px) {
+            [data-testid="stHorizontalBlock"] {
+                flex-direction: column;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns([1, 1, 1], gap="medium")
+
     with col1:
         st.markdown(
             f"""
@@ -422,7 +951,7 @@ if uploaded_file is not None:
             """,
             unsafe_allow_html=True,
         )
-    
+
     with col2:
         st.markdown(
             f"""
@@ -433,14 +962,14 @@ if uploaded_file is not None:
             """,
             unsafe_allow_html=True,
         )
-    
+
     with col3:
         st.markdown(
             f"""
             <div class="metric-card">
                 <div class="metric-label">🔥 Peak Day</div>
                 <div class="metric-value">{count_most}</div>
-                <div class="metric-delta">{date_most.date() if date_most else 'N/A'}</div>
+                <div class="metric-delta">{date_most.date() if date_most is not None else 'N/A'}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -452,14 +981,15 @@ if uploaded_file is not None:
     st.markdown("<h2 class='section-title'>👥 Top Senders</h2>", unsafe_allow_html=True)
     senders = top_n_senders(df, n=top_n)
     if senders:
-        col1, col2 = st.columns([1, 1.5])
-        with col1:
+        sender_col1, sender_col2 = st.columns([1, 1.2])
+        with sender_col1:
             sender_df = pd.DataFrame(senders, columns=["Sender", "Count"])
             st.dataframe(sender_df, use_container_width=True, hide_index=True)
-        with col2:
+        with sender_col2:
             fig = plot_top_senders(df, n=top_n, cmap=color_map)
             if fig is not None:
-                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                # show the mode bar so user has zoom + save icons
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
     else:
         st.info("📭 No sender data available")
 
@@ -469,16 +999,18 @@ if uploaded_file is not None:
     st.markdown("<h2 class='section-title'>🏷️ Email Labels</h2>", unsafe_allow_html=True)
     labels = most_repetitive_label(df, top_n=top_n)
     if labels:
-        col1, col2 = st.columns([1, 1.5])
-        with col1:
-            label_df = pd.DataFrame(labels, columns=["Label", "Count"])
+        label_col1, label_col2 = st.columns([1, 1.5])
+        with label_col1:
+            label_df = pd.DataFrame(labels, columns=["Labels", "Count"])
             st.dataframe(label_df, use_container_width=True, hide_index=True)
-        with col2:
+        with label_col2:
             fig = plot_top_labels(df, n=top_n, cmap=color_map)
             if fig is not None:
-                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                st.markdown("<div class='centered-chart'>", unsafe_allow_html=True)
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
+                st.markdown("</div>", unsafe_allow_html=True)
     else:
-        st.info("🷷 No label data available")
+        st.info("🏷️ No label data available")
 
     st.markdown("---")
 
@@ -486,7 +1018,7 @@ if uploaded_file is not None:
     st.markdown("<h2 class='section-title'>📅 Activity Timeline</h2>", unsafe_allow_html=True)
     fig = plot_emails_per_day(df, cmap=color_map)
     if fig is not None:
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
 
     st.markdown("---")
 
@@ -498,8 +1030,6 @@ if uploaded_file is not None:
         st.dataframe(word_df, use_container_width=True, hide_index=True)
     else:
         st.info("📖 No meaningful words found")
-
-    os.remove(temp_path)
 
 else:
     st.markdown(
@@ -514,7 +1044,7 @@ else:
             <div>
                 <div style='font-size: 4rem; margin-bottom: 1.5rem;'>📧</div>
                 <h2 style='color: var(--text-primary); margin-bottom: 0.5rem; font-size: 1.75rem;'>Ready to Analyze?</h2>
-                <p style='color: var(--text-secondary); font-size: 1.1rem; margin-bottom: 2rem;'>Upload your email CSV file from the sidebar to get started</p>
+                <p style='color: var(--text-secondary); font-size: 1.1rem; margin-bottom: 2rem;'>Upload your email CSV file or try sample data from the sidebar</p>
                 <div style='display: flex; gap: 1rem; justify-content: center;'>
                     <div style='background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: 10px; padding: 1rem; flex: 1; max-width: 200px;'>
                         <div style='font-size: 2rem; margin-bottom: 0.5rem;'>📊</div>
